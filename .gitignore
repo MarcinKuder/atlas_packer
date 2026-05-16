@@ -1,0 +1,24 @@
+# Odin build output
+*.bin
+*.exe
+*.o
+*.a
+*.so
+*.dylib
+
+# Build directories
+build/
+out/
+
+# Notes directory
+notes/
+
+# Generated atlas files
+atlas.png
+atlas.odin
+
+# Input folder
+input/
+
+# Finder
+/.DS_Store
