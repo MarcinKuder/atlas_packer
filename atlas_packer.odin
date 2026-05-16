@@ -1,4 +1,4 @@
-package pakker
+package atlas_packer
 
 import "core:crypto/chacha20"
 import "core:fmt"
@@ -16,7 +16,7 @@ ATLAS_SIZE :: 512
 
 
 main :: proc() {
-    fmt.println(":: Pakker ::")
+    fmt.println(":: running atlas_packer... ::")
 
     infos, err := os.read_all_directory_by_path(INPUT_PATH, context.allocator)
     if err != nil {
@@ -33,7 +33,7 @@ main :: proc() {
     // load all png images
     for fi in infos {
         if !strings.contains(fi.name, TILESET_TAG) {
-            fmt.printfln("%s", fi.name)
+            fmt.printfln("packing %s", fi.name)
             data, _ := os.read_entire_file_from_path(fi.fullpath, context.allocator)
             defer delete(data)
             img, _ := png.load_from_bytes(data)
