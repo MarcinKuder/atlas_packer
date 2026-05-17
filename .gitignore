@@ -17,8 +17,9 @@ notes/
 atlas.png
 atlas.odin
 
-# Input folder
-input/
+# Content of input/output folders
+input/*
+output/*
 
 # Finder
 /.DS_Store

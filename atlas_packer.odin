@@ -1,6 +1,6 @@
 package atlas_packer
 
-import "core:crypto/chacha20"
+import "core:c"
 import "core:fmt"
 import "core:image"
 import "core:image/png"
@@ -13,7 +13,6 @@ INPUT_PATH :: "./input"
 OUTPUT_PATH :: "./output"
 TILESET_TAG :: "tileset"
 ATLAS_SIZE :: 512
-
 
 main :: proc() {
     fmt.println(":: running atlas_packer... ::")
@@ -58,7 +57,7 @@ main :: proc() {
     // pack
     rect_pack.pack_rects(&rc, raw_data(rects[:]), i32(len(rects)))
 
-    // blit image into canvas
+    // blit images into atlas canvas
     Color :: [4]u8
 
     atlas_pixels := make([]Color, ATLAS_SIZE * ATLAS_SIZE)
@@ -77,13 +76,28 @@ main :: proc() {
         }
     }
 
+    // calculate the crop
+    max_x, max_y: int
+    for rect in rects {
+        x := int(rect.x) + int(rect.w)
+        y := int(rect.y) + int(rect.h)
+        if x > max_x {max_x = x}
+        if y > max_y {max_y = y}
+    }
+
+    // write atlas.png
+    stb_image.write_png(
+        OUTPUT_PATH + "/atlas.png",
+        c.int(max_x),
+        c.int(max_y),
+        4,
+        raw_data(atlas_pixels),
+        ATLAS_SIZE * size_of(Color),
+    )
+
     // cleanup
     for img in images {
         png.destroy(img)
     }
-
-    // write atlas.png
-    stb_image.write_png("atlas.png", ATLAS_SIZE, ATLAS_SIZE, 4, raw_data(atlas_pixels), ATLAS_SIZE * size_of(Color))
-
 }
 
