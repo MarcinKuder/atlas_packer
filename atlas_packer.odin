@@ -27,28 +27,124 @@ LETTERS :: "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789?!.,;-+ "
 
 Color :: [4]u8
 
-Glyph :: struct {
+Source :: struct {
+    name:          string,
+    pixels:        []Color, // rgba
+    width, height: int,
+    pad:           int, // 1 for png, 2 for glyphs
+    x, y:          int,
+    packed:        bool,
+    metadata:      Source_Meta,
+}
+
+Source_Meta :: union {
+    Texture_Meta,
+    Glyph_Meta,
+    Sprite_Meta,
+}
+
+Texture_Meta :: struct {}
+
+Glyph_Meta :: struct {
     value:     rune,
-    pixels:    []Color,
-    w, h:      int,
     offset:    [2]int,
     advance_x: int,
 }
 
-Pack_Item :: struct {
-    kind: enum {
-        Texture,
-        Glyph,
-    },
-    idx:  int, //index into images[] or glyphs[]
+Sprite_Meta :: struct {}
+
+load_png :: proc(fi: os.File_Info, sources: ^[dynamic]Source) {
+    fmt.printfln("loading %s", fi.name)
+    data, data_err := os.read_entire_file_from_path(fi.fullpath, context.allocator)
+    defer delete(data)
+    if data_err != nil {
+        fmt.eprintfln("failed to read %s", fi.name)
+        return
+    }
+    img, img_err := png.load_from_bytes(data, {.alpha_add_if_missing}) // load with forcing all images to rgba
+    if img_err != nil {
+        fmt.eprintfln("failed to decode %s: %v", fi.name, img_err)
+        return
+    }
+    defer png.destroy(img)
+
+    if img.channels != 4 || img.depth != 8 {
+        fmt.eprintfln("skipping %s: need RGBA8, got %dch %dbpp", fi.name, img.channels, img.depth)
+        return
+    }
+    append(
+        sources,
+        Source {
+            name = strings.to_pascal_case(filepath.stem(fi.name)),
+            pixels = slice.clone(mem.slice_data_cast([]Color, img.pixels.buf[:])),
+            width = img.width,
+            height = img.height,
+            pad = 1,
+            metadata = Texture_Meta{},
+        },
+    )
 }
 
-write_atlas_odin :: proc(
-    texture_names: []string,
-    rects: []rect_pack.Rect,
-    items: []Pack_Item,
-    glyphs: []Glyph,
-) -> os.Error {
+load_font :: proc(fi: os.File_Info, sources: ^[dynamic]Source) {
+    fmt.printfln("loading %s", fi.name)
+    font_bytes, font_err := os.read_entire_file_from_path(fi.fullpath, context.allocator)
+    defer delete(font_bytes)
+    if font_err != nil {
+        fmt.eprintfln("failed to read %s", fi.name)
+        return
+    }
+
+    font: truetype.fontinfo
+    if !truetype.InitFont(&font, raw_data(font_bytes), 0) {
+        fmt.eprintfln("InitFont failed on %s", fi.name)
+    } else {
+        scale := truetype.ScaleForPixelHeight(&font, f32(FONT_SIZE))
+
+        ascent, descent, line_gap: c.int
+        truetype.GetFontVMetrics(&font, &ascent, &descent, &line_gap)
+        ascent_px := f32(ascent) * scale
+
+        runes := utf8.string_to_runes(LETTERS)
+        defer delete(runes)
+
+        for r in runes {
+            w, h, xoff, yoff: c.int
+            bmp := truetype.GetCodepointBitmap(&font, scale, scale, r, &w, &h, &xoff, &yoff)
+            defer truetype.FreeBitmap(bmp, nil)
+
+            adv, lsb: c.int
+            truetype.GetCodepointHMetrics(&font, r, &adv, &lsb)
+
+            px := make([]Color, int(w) * int(h))
+            for i in 0 ..< int(w) * int(h) {
+                px[i] = {255, 255, 255, bmp[i]}
+            }
+
+            append(
+                sources,
+                Source {
+                    name = strings.to_pascal_case(filepath.stem(fi.name)),
+                    pixels = px,
+                    width = int(w),
+                    height = int(h),
+                    pad = 2,
+                    metadata = Glyph_Meta {
+                        value = r,
+                        offset = {int(xoff), int(f32(yoff) + ascent_px)},
+                        advance_x = int(f32(adv) * scale),
+                    },
+                },
+            )
+        }
+    }
+
+}
+
+load_aseprite :: proc(fi: os.File_Info, sources: ^[dynamic]Source) {
+
+}
+
+write_atlas_odin :: proc(sources: []Source) -> os.Error {
     b: strings.Builder
     defer strings.builder_destroy(&b)
 
@@ -57,22 +153,27 @@ write_atlas_odin :: proc(
     fmt.sbprintln(&b)
     fmt.sbprintln(&b, "import \"base:runtime\"")
     fmt.sbprintln(&b)
-
     fmt.sbprintfln(&b, "TEXTURE_ATLAS_FILENAME :: \"%s\"", OUTPUT_PNG_FILE)
     fmt.sbprintln(&b)
+
+    // --- Texture_Name enum ---
     fmt.sbprintln(&b, "Texture_Name :: enum {")
     fmt.sbprintln(&b, "\tNone,")
-    for tn in texture_names {
-        fmt.sbprintfln(&b, "\t%s,", tn)
+    for s in sources {
+        if _, ok := s.metadata.(Texture_Meta); ok {
+            fmt.sbprintfln(&b, "\t%s,", s.name)
+        }
     }
     fmt.sbprintln(&b, "}")
     fmt.sbprintln(&b)
 
+    // --- Rect ---
     fmt.sbprintln(&b, "Rect :: struct {")
     fmt.sbprintln(&b, "\tx, y, w, h: int")
     fmt.sbprintln(&b, "}")
     fmt.sbprintln(&b)
 
+    // --- Atlas_Texture ---
     fmt.sbprintln(&b, "Atlas_Texture :: struct {")
     fmt.sbprintln(&b, "\trect: Rect,")
     // fmt.sbprintln(&b, "\toffset_top, offset_right, offset_bottom, offset_left: f32,")
@@ -80,32 +181,29 @@ write_atlas_odin :: proc(
     fmt.sbprintln(&b, "}")
     fmt.sbprintln(&b)
 
+    // --- atlas_textures ---
     fmt.sbprintln(&b, "atlas_textures: [Texture_Name]Atlas_Texture = {")
     fmt.sbprintln(&b, "\t.None = {},")
-    for tn, ti in texture_names {
-        tx, ty, tw, th: int
-        for rect in rects {
-            item := items[rect.id]
-            if item.kind == .Texture && item.idx == ti {
-                tx, ty, tw, th = int(rect.x), int(rect.y), int(rect.w) - 1, int(rect.h) - 1
-                break
-            }
+    for s in sources {
+        if _, ok := s.metadata.(Texture_Meta); ok {
+            fmt.sbprintfln(
+                &b,
+                "\t.%s = {{ rect = {{%d, %d, %d, %d}}, original_size = {{%d, %d}} }},",
+                s.name,
+                s.x,
+                s.y,
+                s.width,
+                s.height,
+                s.width,
+                s.height,
+            )
+
         }
-        fmt.sbprintfln(
-            &b,
-            "\t.%s = {{ rect = {{%d, %d, %d, %d}}, original_size = {{%d, %d}} }},",
-            tn,
-            tx,
-            ty,
-            tw,
-            th,
-            tw,
-            th,
-        )
     }
     fmt.sbprintln(&b, "}")
     fmt.sbprintln(&b)
 
+    // --- Atlas_Glyps ---
     fmt.sbprintln(&b, "Atlas_Glyph :: struct {")
     fmt.sbprintln(&b, "\trect: Rect,")
     fmt.sbprintln(&b, "\toffset: [2]int,")
@@ -118,30 +216,24 @@ write_atlas_odin :: proc(
     fmt.sbprintln(&b, "@(init)")
     fmt.sbprintln(&b, "_init_atlas_glyphs :: proc \"contextless\" () {")
     fmt.sbprintln(&b, "\tcontext = runtime.default_context()")
-    for g, gi in glyphs {
-        gx, gy, gw, gh: int
-        for rect in rects {
-            item := items[rect.id]
-            if item.kind == .Glyph && item.idx == gi {
-                gx, gy, gw, gh = int(rect.x) + 1, int(rect.y) + 1, g.w, g.h
-                break
-            }
+    for s in sources {
+        if g, ok := s.metadata.(Glyph_Meta); ok {
+            fmt.sbprintfln(
+                &b,
+                "\tatlas_glyphs['%r'] = {{ rect = {{%d, %d, %d, %d}}, offset = {{%d, %d}}, advance_x = %d }}",
+                g.value,
+                s.x,
+                s.y,
+                s.width,
+                s.height,
+                g.offset.x,
+                g.offset.y,
+                g.advance_x,
+            )
+
         }
-        fmt.sbprintfln(
-            &b,
-            "\tatlas_glyphs['%r'] = {{ rect = {{%d, %d, %d, %d}}, offset = {{%d, %d}}, advance_x = %d }}",
-            g.value,
-            gx,
-            gy,
-            gw,
-            gh,
-            g.offset.x,
-            g.offset.y,
-            g.advance_x,
-        )
     }
     fmt.sbprintln(&b, "}")
-    fmt.sbprintln(&b)
 
     fmt.printfln("writing %s", OUTPUT_ODIN_FILE)
 
@@ -166,94 +258,22 @@ main :: proc() {
     // sort by filename so atlas layout is reproducible across machines
     slice.sort_by(infos, proc(a, b: os.File_Info) -> bool {return a.name < b.name})
 
-    images: [dynamic]^image.Image
+    sources: [dynamic]Source
     defer {
-        for img in images {png.destroy(img)}
-        delete(images)
-    }
-
-    texture_names: [dynamic]string
-    defer delete(texture_names)
-
-    glyphs: [dynamic]Glyph
-    defer {
-        for g in glyphs do delete(g.pixels)
-        delete(glyphs)
+        for s in sources do delete(s.pixels)
+        delete(sources)
     }
 
     for fi in infos {
-        if strings.has_suffix(fi.name, ".png") && !strings.contains(fi.name, TILESET_TAG) {
-            // load all png images
-
-            fmt.printfln("loading %s", fi.name)
-            data, data_err := os.read_entire_file_from_path(fi.fullpath, context.allocator)
-            defer delete(data)
-            if data_err != nil {
-                fmt.eprintfln("failed to read %s", fi.name)
-                continue
-            }
-            img, img_err := png.load_from_bytes(data, {.alpha_add_if_missing}) // load with forcing all images to rgba
-            if img_err != nil {
-                fmt.eprintfln("failed to decode %s: %v", fi.name, img_err)
-                continue
-            }
-            if img.channels != 4 || img.depth != 8 {
-                fmt.eprintfln("skipping %s: need RGBA8, got %dch %dbpp", fi.name, img.channels, img.depth)
-                png.destroy(img)
-                continue
-            }
-            append(&images, img)
-            append(&texture_names, strings.to_pascal_case(filepath.stem(fi.name)))
-        } else if strings.has_suffix(fi.name, ".ttf") {
-            // load fonts
-
-            fmt.printfln("loading %s", fi.name)
-            font_bytes, font_err := os.read_entire_file_from_path(fi.fullpath, context.allocator)
-            defer delete(font_bytes)
-            if font_err != nil {
-                fmt.eprintfln("failed to read %s", fi.name)
-                continue
-            }
-
-            font: truetype.fontinfo
-            if !truetype.InitFont(&font, raw_data(font_bytes), 0) {
-                fmt.eprintfln("InitFont failed on %s", fi.name)
-            } else {
-                scale := truetype.ScaleForPixelHeight(&font, f32(FONT_SIZE))
-
-                ascent, descent, line_gap: c.int
-                truetype.GetFontVMetrics(&font, &ascent, &descent, &line_gap)
-                ascent_px := f32(ascent) * scale
-
-                runes := utf8.string_to_runes(LETTERS)
-                defer delete(runes)
-
-                for r in runes {
-                    w, h, xoff, yoff: c.int
-                    bmp := truetype.GetCodepointBitmap(&font, scale, scale, r, &w, &h, &xoff, &yoff)
-                    defer truetype.FreeBitmap(bmp, nil)
-
-                    adv, lsb: c.int
-                    truetype.GetCodepointHMetrics(&font, r, &adv, &lsb)
-
-                    px := make([]Color, int(w) * int(h))
-                    for i in 0 ..< int(w) * int(h) {
-                        px[i] = {255, 255, 255, bmp[i]}
-                    }
-
-                    append(
-                        &glyphs,
-                        Glyph {
-                            value = r,
-                            pixels = px,
-                            w = int(w),
-                            h = int(h),
-                            offset = {int(xoff), int(f32(yoff) + ascent_px)},
-                            advance_x = int(f32(adv) * scale),
-                        },
-                    )
-                }
-            }
+        switch {
+        case strings.contains(fi.name, TILESET_TAG):
+        // ignore for now
+        case strings.has_suffix(fi.name, ".png") && !strings.contains(fi.name, TILESET_TAG):
+            load_png(fi, &sources)
+        case strings.has_suffix(fi.name, ".ttf"):
+            load_font(fi, &sources)
+        case strings.has_suffix(fi.name, ".ase"), strings.has_suffix(fi.name, ".aseprite"):
+            load_aseprite(fi, &sources)
         }
     }
 
@@ -262,33 +282,14 @@ main :: proc() {
     defer delete(rects)
     total_area: int
 
-    // build rectangles (with 1px padding to prevent bleeding)
-    items: [dynamic]Pack_Item
-    for img, i in images {
-        append(&items, Pack_Item{kind = .Texture, idx = i})
+    // build rectangles (with padding to prevent bleeding; pad is per source)
+    for s, i in sources {
+        if s.width == 0 || s.height == 0 do continue // whitespace glyph: metadata only, no rect
         append(
             &rects,
-            rect_pack.Rect {
-                id = i32(len(items) - 1),
-                w = rect_pack.Coord(img.width + 1),
-                h = rect_pack.Coord(img.height + 1),
-            },
+            rect_pack.Rect{id = i32(i), w = rect_pack.Coord(s.width + s.pad), h = rect_pack.Coord(s.height + s.pad)},
         )
-        total_area += img.width * img.height
-    }
-
-    for glyph, i in glyphs {
-        if glyph.w == 0 || glyph.h == 0 do continue // whitespace (no rect but still emitted)
-        append(&items, Pack_Item{kind = .Glyph, idx = i})
-        append(
-            &rects,
-            rect_pack.Rect {
-                id = i32(len(items) - 1),
-                w  = rect_pack.Coord(glyph.w + 2), // 2px pad because text bleeds more than png
-                h  = rect_pack.Coord(glyph.h + 2),
-            },
-        )
-        total_area += (glyph.w + 2) * (glyph.h + 2)
+        total_area += (s.width + s.pad) * (s.height + s.pad)
     }
 
     // estimate atlas size
@@ -297,7 +298,7 @@ main :: proc() {
         atlas_size *= 2
     }
 
-    // pack with retry untill all rects fit
+    // pack with retry until all rects fit
     for {
         rc: rect_pack.Context
         rc_nodes := make([]rect_pack.Node, atlas_size)
@@ -329,23 +330,13 @@ main :: proc() {
     defer delete(atlas_pixels)
 
     for rect in rects {
-        item := items[rect.id]
-        switch item.kind {
-        case .Texture:
-            img := images[item.idx]
-            src := mem.slice_data_cast([]Color, img.pixels.buf[:])
-            for sy in 0 ..< img.height {
-                dst_row := (int(rect.y) + sy) * atlas_size + int(rect.x)
-                src_row := sy * img.width
-                copy(atlas_pixels[dst_row:dst_row + img.width], src[src_row:src_row + img.width])
-            }
-        case .Glyph:
-            g := glyphs[item.idx]
-            for sy in 0 ..< g.h {
-                dst_row := (int(rect.y) + 1 + sy) * atlas_size + int(rect.x) + 1 // +1 for 2px pad
-                src_row := sy * g.w
-                copy(atlas_pixels[dst_row:dst_row + g.w], g.pixels[src_row:src_row + g.w])
-            }
+        sources[rect.id].x = int(rect.x)
+        sources[rect.id].y = int(rect.y)
+        s := sources[rect.id]
+        for sy in 0 ..< s.height {
+            dst_row := (s.y + sy) * atlas_size + s.x
+            src_row := sy * s.width
+            copy(atlas_pixels[dst_row:dst_row + s.width], s.pixels[src_row:src_row + s.width])
         }
     }
 
@@ -378,6 +369,6 @@ main :: proc() {
         fmt.eprintfln("error: failed to write %s", OUTPUT_PNG_FILE)
     }
 
-    write_atlas_odin(texture_names[:], rects[:], items[:], glyphs[:])
+    write_atlas_odin(sources[:])
 }
 
