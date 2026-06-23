@@ -1,5 +1,6 @@
 # Odin build output
 *.bin
+example/example
 *.exe
 *.o
 *.a
