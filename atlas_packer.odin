@@ -140,10 +140,6 @@ load_font :: proc(fi: os.File_Info, sources: ^[dynamic]Source) {
 
 }
 
-load_aseprite :: proc(fi: os.File_Info, sources: ^[dynamic]Source) {
-
-}
-
 write_atlas_odin :: proc(sources: []Source) -> os.Error {
     b: strings.Builder
     defer strings.builder_destroy(&b)
