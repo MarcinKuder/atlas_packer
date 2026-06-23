@@ -7,7 +7,7 @@ Packing many sprites into one texture lets the GPU draw them in a single batch a
 
 ## Features
 
-- Supports PNG images, TrueType (.ttf) fonts, and Aseprite (.ase/.aseprite) files
+- Supports PNG images, TrueType (.ttf) fonts, and Aseprite (work-in-progress) files
 - Auto-sizes the atlas (with per-source padding to prevent bleeding)
 - Generates atlas.odin with texture enums and glyphs maps
 
